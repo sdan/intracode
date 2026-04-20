@@ -631,6 +631,28 @@ function createServer(env: Env, headerToken: string, ip: string): McpServer {
   );
 
   server.tool(
+    "intracode_pair_room",
+    "Create a one-time pairing code for another device/agent to join a room. Requires an admin room_secret or Authorization bearer header. Prefer this over sharing room_secret.",
+    {
+      room: z.string().min(1).describe("Room name, for example debugging-worker-k7p9."),
+      room_secret: z.string().optional().describe("Admin room secret returned by intracode_create_room. Not needed if the MCP connection has an Authorization bearer header with admin scope."),
+    },
+    async ({ room, room_secret }) => {
+      const token = room_secret || headerToken;
+      if (!token) return toolJson({ error: "missing_room_secret" }, true);
+      const result = await registry(env, "/pair", { room, token, ip });
+      if (result.ok === false) return toolJson(result, true);
+      return toolJson({
+        room: result.room,
+        code: result.code,
+        expires_at: result.expires_at,
+        scopes: result.scopes,
+        next: "Share only this code with the other agent. Do not share room_secret.",
+      });
+    },
+  );
+
+  server.tool(
     "intracode_room",
     "Read and write a durable Markdown context room shared by coding agents. Requires either a room_secret argument or an Authorization bearer header. Use op=read before work, op=write for discoveries, and op=checkpoint for compact summaries.",
     {

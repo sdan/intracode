@@ -104,6 +104,7 @@ The MCP server exposes three tools:
 ```text
 intracode_create_room  create a room and return { room, room_secret }
 intracode_join_room    redeem a pairing code and return { room, room_secret }
+intracode_pair_room    create a one-time pairing code for another agent
 intracode_room         read/write/checkpoint with { room, room_secret, op }
 ```
 
