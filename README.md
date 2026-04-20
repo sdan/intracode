@@ -26,7 +26,7 @@ npx intracode --help
 Point the CLI at the hosted service:
 
 ```bash
-export INTRACODE_URL=https://intracode.surya.workers.dev
+export INTRACODE_URL=https://intracode.sdan.io
 ```
 
 ## Quick Start
@@ -88,8 +88,10 @@ The short code is not the credential. It only mints a long room token for one de
 Connect to:
 
 ```text
-https://<worker>/mcp
+https://intracode.sdan.io
 ```
+
+The apex is the MCP endpoint. Human help is at `https://intracode.sdan.io/help`.
 
 Send the room token as:
 

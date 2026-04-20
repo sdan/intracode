@@ -617,7 +617,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/mcp") {
+    if (url.pathname === "/") {
       const token = bearerToken(request);
       if (!token) return json({ error: "missing_token" }, 401);
       return createMcpHandler(createServer(env, token, clientIp(request)))(request, env, ctx);
@@ -641,7 +641,7 @@ export default {
       return handleRoomHttp(request, env, url, clientIp(request));
     }
 
-    if (url.pathname === "/" || url.pathname === "/help") {
+    if (url.pathname === "/help") {
       return text(httpHelpText());
     }
 
