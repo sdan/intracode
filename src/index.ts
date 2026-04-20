@@ -15,6 +15,7 @@ type RoomRequest = {
   op?: RoomOp;
   body?: string;
   actor?: string;
+  actors?: string[];
   after?: number;
   limit?: number;
   format?: "compact" | "markdown";
@@ -33,6 +34,12 @@ type RoomEvent = {
   actor: string;
   kind: string;
   body_markdown: string;
+};
+
+type ActorActivity = {
+  actor: string;
+  last_event_id: number;
+  last_seen_at: string;
 };
 
 type AuthResult = {
@@ -71,7 +78,7 @@ const GLOBAL_OPS_CAPACITY = 50_000;
 const GLOBAL_OPS_REFILL = 50_000 / DAY_MS;
 const LAST_SEEN_WRITE_INTERVAL_MS = 5 * MINUTE_MS;
 const SLUG_VERBS = ["debugging", "tracing", "reviewing", "testing", "patching", "writing", "reading", "fixing", "pairing", "shipping", "checking", "building", "syncing", "verifying"];
-const SLUG_NOUNS = ["worker", "room", "auth", "token", "checkpoint", "event", "schema", "request", "diff", "build", "agent", "device", "context", "router", "stack", "log"];
+const SLUG_NOUNS = ["worker", "room", "auth", "token", "checkpoint", "event", "schema", "request", "diff", "build", "agent", "actor", "context", "router", "stack", "log"];
 
 export class Room extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -100,7 +107,7 @@ export class Room extends DurableObject<Env> {
 
     if (request.method === "POST" && url.pathname === "/command") {
       const input = await request.json<RoomRequest>();
-      const actor = sanitizeLabel(input.actor || request.headers.get("x-intracode-actor") || "anonymous");
+      const actor = sanitizeActor(input.actor || request.headers.get("x-intracode-actor") || "anonymous");
       const result = this.runOp({ ...input, actor });
       return json(result, result.exitCode === 0 ? 200 : 400);
     }
@@ -151,7 +158,7 @@ export class Room extends DurableObject<Env> {
       }
 
       case "who":
-        return ok(`${input.actor}\n`);
+        return this.renderWho(input.actor, input.actors || []);
 
       case "help":
         return ok(helpText());
@@ -246,10 +253,29 @@ export class Room extends DurableObject<Env> {
     return ok(`${this.renderEvents(events, input.format) || "No events yet."}\n\nnext_cursor: ${cursor}\n`, cursor);
   }
 
+  private renderWho(currentActor: string, actors: string[]): CommandResult {
+    const recent = this.ctx.storage.sql
+      .exec<ActorActivity>(
+        `SELECT actor, MAX(id) AS last_event_id, MAX(ts) AS last_seen_at
+         FROM events
+         GROUP BY actor
+         ORDER BY last_event_id DESC
+         LIMIT 50`,
+      )
+      .toArray();
+    const knownActors = uniqueActors([...actors, currentActor, ...recent.map((entry) => entry.actor)]);
+    const actorLines = knownActors.map((actor) => `- ${actor}${actor === currentActor ? " (current)" : ""}`).join("\n");
+    const activityLines = recent
+      .map((entry) => `- ${entry.actor} — event #${entry.last_event_id} at ${formatTimestamp(entry.last_seen_at)}`)
+      .join("\n");
+
+    return ok(`# Actors\n\n${actorLines || "No actors yet."}\n\n## Recent Activity\n${activityLines || "No events yet."}\n`);
+  }
+
   private renderEvents(events: RoomEvent[], format: "compact" | "markdown"): string {
     return events
       .map((event) => {
-        const timestamp = event.ts.replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+        const timestamp = formatTimestamp(event.ts);
         const body = format === "compact" ? compact(event.body_markdown) : event.body_markdown;
         return `- #${event.id} ${timestamp} **${event.actor}** _${event.kind}_: ${body}`;
       })
@@ -280,7 +306,7 @@ export class Registry extends DurableObject<Env> {
         token_hash TEXT PRIMARY KEY,
         token_id TEXT NOT NULL,
         room TEXT NOT NULL,
-        label TEXT NOT NULL,
+        actor TEXT NOT NULL,
         scopes TEXT NOT NULL,
         created_at TEXT NOT NULL,
         last_seen_at TEXT,
@@ -304,6 +330,17 @@ export class Registry extends DurableObject<Env> {
         updated_at INTEGER NOT NULL
       );
     `);
+    this.migrateTokenOwnerColumn();
+  }
+
+  private migrateTokenOwnerColumn(): void {
+    const columns = this.ctx.storage.sql
+      .exec<{ name: string }>("PRAGMA table_info(tokens)")
+      .toArray()
+      .map((column) => column.name);
+    if (columns.includes("label") && !columns.includes("actor")) {
+      this.ctx.storage.sql.exec("ALTER TABLE tokens RENAME COLUMN label TO actor");
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -314,7 +351,7 @@ export class Registry extends DurableObject<Env> {
       const ip = String(body.ip || "unknown");
       const limited = this.checkBucket(`create:ip:${ip}`, CREATE_IP_CAPACITY, CREATE_IP_REFILL) || this.checkBucket("create:global", CREATE_GLOBAL_CAPACITY, CREATE_GLOBAL_REFILL);
       if (limited) return json(limited, 429);
-      return json(await this.createRoom(String(body.room || ""), String(body.label || "device")));
+      return json(await this.createRoom(String(body.room || ""), String(body.actor || defaultActor("actor"))));
     }
 
     if (request.method === "POST" && url.pathname === "/verify") {
@@ -331,19 +368,19 @@ export class Registry extends DurableObject<Env> {
       const ip = String(body.ip || "unknown");
       const limited = this.checkBucket(`join:ip:${ip}`, JOIN_IP_CAPACITY, JOIN_IP_REFILL) || this.checkBucket("join:global", JOIN_GLOBAL_CAPACITY, JOIN_GLOBAL_REFILL);
       if (limited) return json(limited, 429);
-      return json(await this.join(String(body.code || ""), String(body.label || "device")));
+      return json(await this.join(String(body.code || ""), String(body.actor || defaultActor("actor"))));
     }
 
-    if (request.method === "POST" && url.pathname === "/devices") {
-      const auth = await this.verify(String(body.room || ""), bearerFromUnknown(body.token), "admin", String(body.ip || "unknown"));
+    if (request.method === "POST" && url.pathname === "/actors") {
+      const auth = await this.verify(String(body.room || ""), bearerFromUnknown(body.token), "read", String(body.ip || "unknown"));
       if (!auth.ok) return json(auth, 401);
-      return json({ devices: this.devices(String(body.room)) });
+      return json({ ok: true, actors: this.actors(String(body.room)) });
     }
 
     if (request.method === "POST" && url.pathname === "/revoke") {
       const auth = await this.verify(String(body.room || ""), bearerFromUnknown(body.token), "admin", String(body.ip || "unknown"));
       if (!auth.ok) return json(auth, 401);
-      return json(this.revoke(String(body.room), String(body.label || "")));
+      return json(this.revoke(String(body.room), String(body.actor || "")));
     }
 
     if (request.method === "POST" && url.pathname === "/rotate") {
@@ -361,9 +398,9 @@ export class Registry extends DurableObject<Env> {
     return json({ error: "not_found" }, 404);
   }
 
-  private async createRoom(room: string, label: string): Promise<Record<string, unknown>> {
+  private async createRoom(room: string, actor: string): Promise<Record<string, unknown>> {
     const cleanRoom = room.trim() ? sanitizeRoom(room) : this.generateRoomSlug();
-    const cleanLabel = sanitizeLabel(label);
+    const cleanActor = sanitizeActor(actor);
     const existing = this.ctx.storage.sql.exec("SELECT room FROM rooms WHERE room = ?", cleanRoom).toArray()[0];
     if (existing) return { ok: false, error: "room_exists" };
 
@@ -375,17 +412,17 @@ export class Registry extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec("INSERT INTO rooms (room, created_at) VALUES (?, ?)", cleanRoom, now);
     this.ctx.storage.sql.exec(
-      `INSERT INTO tokens (token_hash, token_id, room, label, scopes, created_at)
+      `INSERT INTO tokens (token_hash, token_id, room, actor, scopes, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       tokenHash,
       tokenId,
       cleanRoom,
-      cleanLabel,
+      cleanActor,
       scopes.join(","),
       now,
     );
 
-    return { ok: true, room: cleanRoom, token, label: cleanLabel, scopes };
+    return { ok: true, room: cleanRoom, token, actor: cleanActor, scopes };
   }
 
   private async verify(room: string, token: string, scope: Scope, ip: string): Promise<AuthResult> {
@@ -408,8 +445,8 @@ export class Registry extends DurableObject<Env> {
     }
 
     const row = this.ctx.storage.sql
-      .exec<{ token_id: string; room: string; label: string; scopes: string; last_seen_at: string | null; revoked_at: string | null }>(
-        `SELECT token_id, room, label, scopes, last_seen_at, revoked_at
+      .exec<{ token_id: string; room: string; actor: string; scopes: string; last_seen_at: string | null; revoked_at: string | null }>(
+        `SELECT token_id, room, actor, scopes, last_seen_at, revoked_at
          FROM tokens
          WHERE token_hash = ?`,
         tokenHash,
@@ -427,7 +464,7 @@ export class Registry extends DurableObject<Env> {
       this.ctx.storage.sql.exec("UPDATE tokens SET last_seen_at = ? WHERE token_hash = ?", new Date(now).toISOString(), tokenHash);
     }
 
-    return { ok: true, room: row.room, actor: row.label, scopes, tokenId: row.token_id };
+    return { ok: true, room: row.room, actor: row.actor, scopes, tokenId: row.token_id };
   }
 
   private checkBucket(key: string, maxCredits: number, creditsPerMs: number, cost = 1): AuthResult | null {
@@ -480,9 +517,9 @@ export class Registry extends DurableObject<Env> {
     return { ok: true, room: cleanRoom, code, expires_at: expiresAt, scopes };
   }
 
-  private async join(code: string, label: string): Promise<Record<string, unknown>> {
+  private async join(code: string, actor: string): Promise<Record<string, unknown>> {
     const cleanCode = code.trim();
-    const cleanLabel = sanitizeLabel(label);
+    const cleanActor = sanitizeActor(actor);
     const codeHash = await sha256(cleanCode);
     const row = this.ctx.storage.sql
       .exec<{ room: string; scopes: string; expires_at: string; used_at: string | null }>(
@@ -501,50 +538,51 @@ export class Registry extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec("UPDATE pair_codes SET used_at = ? WHERE code_hash = ?", now, codeHash);
     this.ctx.storage.sql.exec(
-      `INSERT INTO tokens (token_hash, token_id, room, label, scopes, created_at)
+      `INSERT INTO tokens (token_hash, token_id, room, actor, scopes, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       tokenHash,
       tokenId,
       row.room,
-      cleanLabel,
+      cleanActor,
       row.scopes,
       now,
     );
 
-    return { ok: true, room: row.room, token, label: cleanLabel, scopes: row.scopes.split(",") };
+    return { ok: true, room: row.room, token, actor: cleanActor, scopes: row.scopes.split(",") };
   }
 
-  private devices(room: string): Array<Record<string, unknown>> {
+  private actors(room: string): string[] {
     const cleanRoom = sanitizeRoom(room);
     return this.ctx.storage.sql
-      .exec<{ token_id: string; label: string; scopes: string; created_at: string; last_seen_at: string | null; revoked_at: string | null }>(
-        `SELECT token_id, label, scopes, created_at, last_seen_at, revoked_at
+      .exec<{ actor: string }>(
+        `SELECT actor
          FROM tokens
-         WHERE room = ?
-         ORDER BY created_at ASC`,
+         WHERE room = ? AND revoked_at IS NULL
+         GROUP BY actor
+         ORDER BY MIN(created_at) ASC`,
         cleanRoom,
       )
       .toArray()
-      .map((row) => ({ ...row, scopes: row.scopes.split(","), active: !row.revoked_at }));
+      .map((row) => row.actor);
   }
 
-  private revoke(room: string, label: string): Record<string, unknown> {
+  private revoke(room: string, actor: string): Record<string, unknown> {
     const cleanRoom = sanitizeRoom(room);
-    const cleanLabel = sanitizeLabel(label);
+    const cleanActor = sanitizeActor(actor);
     this.ctx.storage.sql.exec(
-      "UPDATE tokens SET revoked_at = ? WHERE room = ? AND label = ? AND revoked_at IS NULL",
+      "UPDATE tokens SET revoked_at = ? WHERE room = ? AND actor = ? AND revoked_at IS NULL",
       new Date().toISOString(),
       cleanRoom,
-      cleanLabel,
+      cleanActor,
     );
-    return { ok: true, room: cleanRoom, revoked: cleanLabel };
+    return { ok: true, room: cleanRoom, revoked: cleanActor };
   }
 
   private async rotate(room: string, oldToken: string, actor: string): Promise<Record<string, unknown>> {
     const cleanRoom = sanitizeRoom(room);
     const oldHash = await sha256(oldToken);
     const row = this.ctx.storage.sql
-      .exec<{ label: string; scopes: string }>("SELECT label, scopes FROM tokens WHERE token_hash = ? AND room = ? AND revoked_at IS NULL", oldHash, cleanRoom)
+      .exec<{ actor: string; scopes: string }>("SELECT actor, scopes FROM tokens WHERE token_hash = ? AND room = ? AND revoked_at IS NULL", oldHash, cleanRoom)
       .toArray()[0];
     if (!row) return { ok: false, error: "invalid_token" };
 
@@ -555,17 +593,17 @@ export class Registry extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec("UPDATE tokens SET revoked_at = ? WHERE token_hash = ?", now, oldHash);
     this.ctx.storage.sql.exec(
-      `INSERT INTO tokens (token_hash, token_id, room, label, scopes, created_at)
+      `INSERT INTO tokens (token_hash, token_id, room, actor, scopes, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       tokenHash,
       tokenId,
       cleanRoom,
-      actor || row.label,
+      actor || row.actor,
       row.scopes,
       now,
     );
 
-    return { ok: true, room: cleanRoom, token, label: actor || row.label, scopes: row.scopes.split(",") };
+    return { ok: true, room: cleanRoom, token, actor: actor || row.actor, scopes: row.scopes.split(",") };
   }
 
   private deleteRoom(room: string): Record<string, unknown> {
@@ -595,15 +633,15 @@ function createServer(env: Env, headerToken: string, ip: string): McpServer {
     "Create a shared context room. Returns a room and room_secret. Keep room_secret private; pass it to intracode_room for future room operations.",
     {
       name: z.string().optional().describe("Optional room slug. Omit to generate a friendly slug like debugging-worker-k7p9."),
-      label: z.string().optional().describe("Device/agent label, for example claude-code."),
+      actor: z.string().optional().describe("Actor name for attribution, for example claude-code. Omit to auto-generate one."),
     },
-    async ({ name, label }) => {
-      const result = await registry(env, "/create", { room: name || "", label: label || "mcp-agent", ip });
+    async ({ name, actor }) => {
+      const result = await registry(env, "/create", { room: name || "", actor: actor || defaultActor("mcp"), ip });
       if (result.ok === false) return toolJson(result, true);
       return toolJson({
         room: result.room,
         room_secret: result.token,
-        label: result.label,
+        actor: result.actor,
         scopes: result.scopes,
         next: "Use intracode_room with this room and room_secret. Do not write room_secret into the room.",
       });
@@ -615,15 +653,15 @@ function createServer(env: Env, headerToken: string, ip: string): McpServer {
     "Redeem a one-time pairing code. Returns a room and room_secret. Keep room_secret private; pass it to intracode_room for future room operations.",
     {
       code: z.string().min(1).describe("One-time pairing code, for example M2Q4-K7P9."),
-      label: z.string().optional().describe("Device/agent label, for example claude-code."),
+      actor: z.string().optional().describe("Actor name for attribution, for example claude-code. Omit to auto-generate one."),
     },
-    async ({ code, label }) => {
-      const result = await registry(env, "/join", { code, label: label || "mcp-agent", ip });
+    async ({ code, actor }) => {
+      const result = await registry(env, "/join", { code, actor: actor || defaultActor("mcp"), ip });
       if (result.ok === false) return toolJson(result, true);
       return toolJson({
         room: result.room,
         room_secret: result.token,
-        label: result.label,
+        actor: result.actor,
         scopes: result.scopes,
         next: "Use intracode_room with this room and room_secret. Do not write room_secret into the room.",
       });
@@ -632,7 +670,7 @@ function createServer(env: Env, headerToken: string, ip: string): McpServer {
 
   server.tool(
     "intracode_pair_room",
-    "Create a one-time pairing code for another device/agent to join a room. Requires an admin room_secret or Authorization bearer header. Prefer this over sharing room_secret.",
+    "Create a one-time pairing code for another actor to join a room. Requires an admin room_secret or Authorization bearer header. Prefer this over sharing room_secret.",
     {
       room: z.string().min(1).describe("Room name, for example debugging-worker-k7p9."),
       room_secret: z.string().optional().describe("Admin room secret returned by intracode_create_room. Not needed if the MCP connection has an Authorization bearer header with admin scope."),
@@ -688,12 +726,12 @@ export default {
     }
 
     if (url.pathname === "/api/rooms" && request.method === "POST") {
-      const input = await request.json<{ room?: string; label?: string }>();
+      const input = await request.json<{ room?: string; actor?: string }>();
       return json(await registry(env, "/create", { ...input, ip: clientIp(request) }));
     }
 
     if (url.pathname === "/api/join" && request.method === "POST") {
-      const input = await request.json<{ code?: string; label?: string }>();
+      const input = await request.json<{ code?: string; actor?: string }>();
       return json(await registry(env, "/join", { ...input, ip: clientIp(request) }));
     }
 
@@ -725,13 +763,13 @@ async function handleRoomAdmin(request: Request, env: Env, url: URL, ip: string)
     return json(await registry(env, "/pair", { room, token, scopes: input.scopes, ip }));
   }
 
-  if (request.method === "GET" && action === "devices") {
-    return json(await registry(env, "/devices", { room, token, ip }));
+  if (request.method === "GET" && action === "actors") {
+    return json(await registry(env, "/actors", { room, token, ip }));
   }
 
   if (request.method === "POST" && action === "revoke") {
-    const input = await request.json<{ label?: string }>();
-    return json(await registry(env, "/revoke", { room, token, label: input.label, ip }));
+    const input = await request.json<{ actor?: string }>();
+    return json(await registry(env, "/revoke", { room, token, actor: input.actor, ip }));
   }
 
   if (request.method === "POST" && action === "rotate") {
@@ -781,7 +819,8 @@ async function authedRoomOp(env: Env, token: string, room: string, input: RoomRe
   const op = input.op || "read";
   const auth = await verify(env, room, token, scopeForOp(op), ip);
   if (!auth.ok || !auth.actor) return err(auth.error || "unauthorized");
-  return runRoomOp(env, room, { ...input, actor: auth.actor });
+  const actors = op === "who" ? await roomActors(env, room, token, ip) : undefined;
+  return runRoomOp(env, room, { ...input, actor: auth.actor, actors });
 }
 
 async function runRoomOp(env: Env, room: string, input: RoomRequest & { actor: string }): Promise<CommandResult> {
@@ -821,6 +860,11 @@ async function registry(env: Env, path: string, body: Record<string, unknown>): 
     body: JSON.stringify(body),
   });
   return response.json();
+}
+
+async function roomActors(env: Env, room: string, token: string, ip: string): Promise<string[] | undefined> {
+  const result = await registry(env, "/actors", { room, token, ip });
+  return Array.isArray(result.actors) ? result.actors.filter((actor): actor is string => typeof actor === "string") : undefined;
 }
 
 function scopeForOp(op: RoomOp): Scope {
@@ -865,14 +909,30 @@ function sanitizeRoom(room: string): string {
   return value;
 }
 
-function sanitizeLabel(label: string): string {
-  return label.trim().replace(/[^a-zA-Z0-9@._-]/g, "_").slice(0, 80) || "device";
+function sanitizeActor(actor: string): string {
+  return actor.trim().replace(/[^a-zA-Z0-9@._-]/g, "_").slice(0, 80) || "actor";
 }
 
 function compact(value: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= MAX_BODY_CHARS_IN_READ) return normalized;
   return `${normalized.slice(0, MAX_BODY_CHARS_IN_READ - 1)}…`;
+}
+
+function formatTimestamp(value: string): string {
+  return value.replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+}
+
+function uniqueActors(actors: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const actor of actors) {
+    const cleanActor = sanitizeActor(actor);
+    if (seen.has(cleanActor)) continue;
+    seen.add(cleanActor);
+    result.push(cleanActor);
+  }
+  return result;
 }
 
 function bearerToken(request: Request): string {
@@ -890,6 +950,10 @@ function clientIp(request: Request): string {
 
 function bearerFromUnknown(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function defaultActor(prefix: string): string {
+  return `${prefix}-${randomSuffix(4)}`;
 }
 
 function randomToken(): string {
@@ -958,9 +1022,9 @@ function toolJson(value: unknown, isError = false): { content: Array<{ type: "te
 }
 
 function helpText(): string {
-  return `intracode room ops\n\nread                  Show checkpoint and recent events\nhistory               Show recent events\nwrite                 Append a Markdown note; requires body\ncheckpoint            Replace checkpoint; requires body\nwho                   Show current actor\nhelp                  Show this help\n`;
+  return `intracode room ops\n\nread                  Show checkpoint and recent events\nhistory               Show recent events\nwrite                 Append a Markdown note; requires body\ncheckpoint            Replace checkpoint; requires body\nwho                   Show known actors and recent activity\nhelp                  Show this help\n`;
 }
 
 function httpHelpText(): string {
-  return `# intracode\n\nShared Markdown context rooms for coding agents.\n\nCreate a room, pair another device with a one-time code, then read/write room context by sending a bearer token.\n`;
+  return `# intracode\n\nShared Markdown context rooms for coding agents.\n\nCreate a room, pair another actor with a one-time code, then read/write room context by sending a bearer token.\n`;
 }

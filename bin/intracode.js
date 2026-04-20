@@ -13,9 +13,9 @@ function usage() {
 Shared context rooms for coding agents.
 
 Setup:
-  intracode create [room] [--label <device>]
+  intracode create [room] [--actor <actor>]
   intracode pair <room>
-  intracode join <code> [--label <device>]
+  intracode join <code> [--actor <actor>]
 
 Use:
   intracode <room> read
@@ -23,10 +23,10 @@ Use:
   intracode <room> write <markdown>
   intracode <room> checkpoint <markdown>
 
-Devices:
+Manage:
   intracode rooms
-  intracode devices <room>
-  intracode revoke <room> <label>
+  intracode actors <room>
+  intracode revoke <room> <actor>
   intracode rotate <room>
   intracode export <room>
   intracode delete <room>
@@ -69,10 +69,10 @@ function configKey(baseUrl, room) {
   return `${baseUrl} ${room}`;
 }
 
-function saveRoom(baseUrl, room, token, label) {
+function saveRoom(baseUrl, room, token, actor) {
   const config = readConfig();
   config.rooms ||= {};
-  config.rooms[configKey(baseUrl, room)] = { url: baseUrl, room, token, label };
+  config.rooms[configKey(baseUrl, room)] = { url: baseUrl, room, token, actor };
   writeConfig(config);
 }
 
@@ -81,7 +81,7 @@ function roomToken(baseUrl, room) {
   return readConfig().rooms?.[configKey(baseUrl, room)]?.token || "";
 }
 
-function defaultLabel() {
+function defaultActor() {
   return `${process.env.USER || "agent"}@${os.hostname()}`;
 }
 
@@ -140,12 +140,12 @@ async function main() {
   }
 
   if ((args[0] === "room" && args[1] === "create") || args[0] === "create") {
-    const label = flagValue(args, "--label", defaultLabel());
+    const actor = flagValue(args, "--actor", defaultActor());
     const room = args[0] === "create" ? args[1] : args[2];
-    const result = await request(baseUrl, "/api/rooms", { body: { room, label } });
-    saveRoom(baseUrl, result.room, result.token, result.label);
+    const result = await request(baseUrl, "/api/rooms", { body: { room, actor } });
+    saveRoom(baseUrl, result.room, result.token, result.actor);
     console.log(`created ${result.room}`);
-    console.log(`saved token for ${result.label}`);
+    console.log(`saved token for ${result.actor}`);
     return;
   }
 
@@ -160,42 +160,40 @@ async function main() {
 
   if (args[0] === "join") {
     const code = args[1];
-    const label = flagValue(args, "--label", defaultLabel());
-    const result = await request(baseUrl, "/api/join", { body: { code, label } });
-    saveRoom(baseUrl, result.room, result.token, result.label);
+    const actor = flagValue(args, "--actor", defaultActor());
+    const result = await request(baseUrl, "/api/join", { body: { code, actor } });
+    saveRoom(baseUrl, result.room, result.token, result.actor);
     console.log(`joined ${result.room}`);
-    console.log(`saved token for ${result.label}`);
+    console.log(`saved token for ${result.actor}`);
     return;
   }
 
-  if (args[0] === "devices") {
+  if (args[0] === "actors") {
     const room = args[1];
-    const result = await request(baseUrl, `/api/rooms/${encodeURIComponent(room)}/devices`, {
+    const result = await request(baseUrl, `/api/rooms/${encodeURIComponent(room)}/actors`, {
       method: "GET",
       token: roomToken(baseUrl, room),
     });
-    for (const device of result.devices) {
-      console.log(`${device.label}\t${device.active ? "active" : "revoked"}\t${device.scopes.join(",")}`);
-    }
+    for (const actor of result.actors) console.log(actor);
     return;
   }
 
   if (args[0] === "rooms") {
     const config = readConfig();
     for (const entry of Object.values(config.rooms || {})) {
-      console.log(`${entry.room}\t${entry.label}\t${entry.url}`);
+      console.log(`${entry.room}\t${entry.actor}\t${entry.url}`);
     }
     return;
   }
 
   if (args[0] === "revoke") {
     const room = args[1];
-    const label = args[2];
+    const actor = args[2];
     await request(baseUrl, `/api/rooms/${encodeURIComponent(room)}/revoke`, {
       token: roomToken(baseUrl, room),
-      body: { label },
+      body: { actor },
     });
-    console.log(`revoked ${label}`);
+    console.log(`revoked ${actor}`);
     return;
   }
 
@@ -205,9 +203,9 @@ async function main() {
       token: roomToken(baseUrl, room),
       body: {},
     });
-    saveRoom(baseUrl, result.room, result.token, result.label);
+    saveRoom(baseUrl, result.room, result.token, result.actor);
     console.log(`rotated ${result.room}`);
-    console.log(`saved token for ${result.label}`);
+    console.log(`saved token for ${result.actor}`);
     return;
   }
 
