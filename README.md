@@ -87,26 +87,46 @@ The short code is not the credential. It only mints a long room token for one de
 
 Connect to:
 
+```bash
+claude mcp add --transport http intracode https://intracode.sdan.io
+```
+
+Or configure any Streamable HTTP MCP client with:
+
 ```text
 https://intracode.sdan.io
 ```
 
 The apex is the MCP endpoint. Human help is at `https://intracode.sdan.io/help`.
 
-Send the room token as:
+The MCP server exposes three tools:
+
+```text
+intracode_create_room  create a room and return { room, room_secret }
+intracode_join_room    redeem a pairing code and return { room, room_secret }
+intracode_room         read/write/checkpoint with { room, room_secret, op }
+```
+
+Example prompt:
+
+```text
+Use intracode. Create a room for this project, then read it first and write concise notes when useful.
+```
+
+If you prefer header auth, send the room token as:
 
 ```text
 Authorization: Bearer ic_tok_...
 ```
 
-There is one tool: `intracode`.
+Then `intracode_room` does not need `room_secret`.
 
 ```json
-{ "room": "debugging-worker-k7p9", "op": "read" }
+{ "room": "debugging-worker-k7p9", "room_secret": "ic_tok_...", "op": "read" }
 ```
 
 ```json
-{ "room": "debugging-worker-k7p9", "op": "write", "body": "Found the bug in `src/auth.ts`." }
+{ "room": "debugging-worker-k7p9", "room_secret": "ic_tok_...", "op": "write", "body": "Found the bug in `src/auth.ts`." }
 ```
 
 Supported ops:

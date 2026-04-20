@@ -587,21 +587,64 @@ export class Registry extends DurableObject<Env> {
   }
 }
 
-function createServer(env: Env, token: string, ip: string): McpServer {
+function createServer(env: Env, headerToken: string, ip: string): McpServer {
   const server = new McpServer({ name: "intracode", version: "0.1.0" });
 
   server.tool(
-    "intracode",
-    "Read and write a durable Markdown context room shared by coding agents. Use op=read before work, op=write for discoveries, and op=checkpoint for compact summaries.",
+    "intracode_create_room",
+    "Create a shared context room. Returns a room and room_secret. Keep room_secret private; pass it to intracode_room for future room operations.",
+    {
+      name: z.string().optional().describe("Optional room slug. Omit to generate a friendly slug like debugging-worker-k7p9."),
+      label: z.string().optional().describe("Device/agent label, for example claude-code."),
+    },
+    async ({ name, label }) => {
+      const result = await registry(env, "/create", { room: name || "", label: label || "mcp-agent", ip });
+      if (result.ok === false) return toolJson(result, true);
+      return toolJson({
+        room: result.room,
+        room_secret: result.token,
+        label: result.label,
+        scopes: result.scopes,
+        next: "Use intracode_room with this room and room_secret. Do not write room_secret into the room.",
+      });
+    },
+  );
+
+  server.tool(
+    "intracode_join_room",
+    "Redeem a one-time pairing code. Returns a room and room_secret. Keep room_secret private; pass it to intracode_room for future room operations.",
+    {
+      code: z.string().min(1).describe("One-time pairing code, for example M2Q4-K7P9."),
+      label: z.string().optional().describe("Device/agent label, for example claude-code."),
+    },
+    async ({ code, label }) => {
+      const result = await registry(env, "/join", { code, label: label || "mcp-agent", ip });
+      if (result.ok === false) return toolJson(result, true);
+      return toolJson({
+        room: result.room,
+        room_secret: result.token,
+        label: result.label,
+        scopes: result.scopes,
+        next: "Use intracode_room with this room and room_secret. Do not write room_secret into the room.",
+      });
+    },
+  );
+
+  server.tool(
+    "intracode_room",
+    "Read and write a durable Markdown context room shared by coding agents. Requires either a room_secret argument or an Authorization bearer header. Use op=read before work, op=write for discoveries, and op=checkpoint for compact summaries.",
     {
       room: z.string().min(1).describe("Room name, for example 'sdan/intracode/auth'."),
+      room_secret: z.string().optional().describe("Room secret returned by intracode_create_room or intracode_join_room. Not needed if the MCP connection has an Authorization bearer header."),
       op: z.enum(["read", "write", "checkpoint", "history", "who", "help"]).default("read").describe("Operation to run."),
       body: z.string().optional().describe("Markdown body for write/checkpoint."),
       after: z.number().int().nonnegative().optional().describe("Only return events after this event id."),
       limit: z.number().int().positive().max(MAX_LIMIT).optional().describe("Maximum events to return. Defaults to 10."),
       format: z.enum(["compact", "markdown"]).optional().describe("compact truncates long event bodies. Defaults to compact."),
     },
-    async ({ room, op, body, after, limit, format }) => {
+    async ({ room, room_secret, op, body, after, limit, format }) => {
+      const token = room_secret || headerToken;
+      if (!token) return toolJson({ error: "missing_room_secret" }, true);
       const result = await authedRoomOp(env, token, room, { op, body, after, limit, format }, ip);
       return {
         content: [{ type: "text", text: result.exitCode === 0 ? result.stdout : result.stderr }],
@@ -619,7 +662,6 @@ export default {
 
     if (url.pathname === "/") {
       const token = bearerToken(request);
-      if (!token) return json({ error: "missing_token" }, 401);
       return createMcpHandler(createServer(env, token, clientIp(request)))(request, env, ctx);
     }
 
@@ -884,6 +926,13 @@ function text(value: string, status = 200): Response {
     status,
     headers: { "content-type": "text/markdown; charset=utf-8" },
   });
+}
+
+function toolJson(value: unknown, isError = false): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    isError,
+  };
 }
 
 function helpText(): string {
