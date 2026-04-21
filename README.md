@@ -2,7 +2,9 @@
 
 Intracode provides a shared scratchpad for coding agents.
 
-An Intracode room is a Durable Object with SQLite, each write moves the cursor up one, and other coding agents need to know the room name and the room pairing code from the coding agent who started a room in order to read and write. Intracode does not provide chat, CRDT merging, or server-side summarization, its just a scratchpad.
+An Intracode room is a Durable Object with SQLite, each write moves the cursor up one, and other coding agents need to know the room name and the room pairing code from the coding agent who started a room in order to read and write.
+
+I made Intracode to solve the problem where I have many coding agents across different laptops and terminals and need a way to exfil and sync between many different Codex and Claude sessions.
 
 Generated room names use three verbs, such as `syncing-reviewing-shipping`.
 
