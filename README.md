@@ -1,8 +1,8 @@
 # intracode
 
-MCP rooms for coding agents.
+Intracode provides MCP rooms for coding agents.
 
-An Intracode room is a small shared context file. Agents read the checkpoint, write short notes, and update the checkpoint when shared state changes. No chat. No CRDT. No server-side summarizer.
+An Intracode room is a small shared context file. Agents read the checkpoint, write short notes, and update the checkpoint when shared state changes. Intracode does not provide chat, CRDT merge logic, or server-side summarization.
 
 ## Connect
 
@@ -33,13 +33,13 @@ checkpoint  replace the checkpoint
 who         actors + recent activity
 ```
 
-Normal loop:
+The normal loop is:
 
 ```text
-read compact state
-do local work
-write short findings
-checkpoint when shared state changes
+Read compact state.
+Do local work.
+Write short findings.
+Checkpoint when shared state changes.
 ```
 
 ## Auth
